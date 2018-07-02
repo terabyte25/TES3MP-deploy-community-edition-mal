@@ -2,7 +2,7 @@
 
 set -e
 
-VERSION="2.10.2"
+VERSION="2.11.0"
 
 TES3MP_STABLE_VERSION="0.6.2"
 TES3MP_STABLE_VERSION_FILE="0.43.0\n5fd9079b26a60d3a8a52299d0ea8146b85323339"
@@ -316,7 +316,7 @@ if [ $INSTALL ]; then
               echo -e "Done!"
         fi
         sudo dnf --refresh groupinstall development-tools
-        sudo dnf --refresh install unzip wget cmake openal-devel OpenSceneGraph-qt-devel SDL2-devel qt4-devel boost-filesystem git boost-thread boost-program-options boost-system ffmpeg-devel ffmpeg-libs bullet-devel gcc-c++ mygui-devel unshield-devel tinyxml-devel cmake luajit luajit-devel #llvm35 llvm clang ncurses
+        sudo dnf --refresh install unzip wget cmake openal-devel OpenSceneGraph-qt-devel SDL2-devel qt4-devel boost-filesystem git boost-thread boost-program-options boost-system ffmpeg-devel ffmpeg-libs bullet-devel gcc-c++ mygui-devel unshield-devel tinyxml-devel cmake ncurses-c++-libs ncurses-devel luajit luajit-devel
         BUILD_BULLET=true
     ;;
 
@@ -406,6 +406,13 @@ if [ $INSTALL ]; then
   echo -e "\n>> Building RakNet"
   mkdir -p "$DEPENDENCIES"/raknet/build
   cd "$DEPENDENCIES"/raknet/build
+
+  # Compatibility hack for 0.6.2, please remove once stable becomes 0.6.3
+  if [[ "$TARGET_COMMIT" == "0.6.2" || "$TARGET_COMMIT" == "stable" || "$TARGET_COMMIT" == "" ]]; then
+    git fetch --unshallow | true
+    git checkout 1d6bb9e88db04aaeaa8752835c17574509d05a31
+  fi
+
   rm -f CMakeCache.txt
   cmake -DCMAKE_BUILD_TYPE=Release -DRAKNET_ENABLE_DLL=OFF -DRAKNET_ENABLE_SAMPLES=OFF -DRAKNET_ENABLE_STATIC=ON -DRAKNET_GENERATE_INCLUDE_ONLY_DIR=ON ..
   make -j$CORES
@@ -753,9 +760,10 @@ if [ $MAKE_PACKAGE ]; then
   LIBRARIES_OPENMW=("libavcodec.so" "libavformat.so" "libavutil.so" "libboost_filesystem.so" "libboost_program_options.so" "libboost_system.so" "libboost_thread.so" "libBulletCollision.so" "libbz2.so" "libLinearMath.so" "libMyGUIEngine.so" "libopenal.so" "libOpenThreads.so" "libosgAnimation.so" "libosgDB.so" "libosgFX.so" "libosgGA.so" "libosgParticle.so" "libosg.so" "libosgText.so" "libosgUtil.so" "libosgViewer.so" "libosgWidget.so" "libSDL2" "libswresample.so" "libswscale.so" "libts.so" "libtxc_dxtn.so" "libunshield.so" "libuuid.so" "osgPlugins") #"libfreetype.so"
   LIBRARIES_TES3MP=("libcallff.a" "libRakNetLibStatic.a" "libterra.a" "libtinfo.so")
   LIBRARIES_EXTRA=("libpng16.so" "libpng12.so") #"libstdc++.so.6"
+  LIBRARIES_SERVER=("libboost_system.so" "libboost_filesystem.so" "libboost_program_options.so")
 
   #EXIT IF TES3MP hasn't been compiled yet
-  if [ ! -f "$DEVELOPMENT"/tes3mp ]; then
+  if [[ ! -f "$DEVELOPMENT"/tes3mp && ! -f "$DEVELOPMENT"/tes3mp-server ]]; then
     echo -e "\nTES3MP has to be built before packaging"
     exit 1
   fi
@@ -796,6 +804,8 @@ if [ $MAKE_PACKAGE ]; then
   echo -e "\nCopying needed libraries"
 
   LIBRARIES=("${LIBRARIES_OPENMW[@]}" "${LIBRARIES_TES3MP[@]}" "${LIBRARIES_EXTRA[@]}")
+  if [ $SERVER_ONLY ]; then LIBRARIES=("${LIBRARIES_SERVER[@]}"); fi
+
   for LIB in "${LIBRARIES[@]}"; do
     find /lib /usr/lib /usr/local/lib /usr/local/lib64 "$DEPENDENCIES" -name "$LIB*" -exec cp -r --preserve=links "{}" ./lib \; 2> /dev/null || true
     echo -ne "$LIB\033[0K\r"
@@ -812,14 +822,22 @@ if [ $MAKE_PACKAGE ]; then
   done
 
   #PACKAGE INFO
+
+  PACKAGE_PREFIX="tes3mp"
+  if [ $SERVER_ONLY ]; then
+    PACKAGE_PREFIX="$PACKAGE_PREFIX-server"
+  fi
+
   PACKAGE_ARCH=$(uname -m)
   PACKAGE_SYSTEM=$(uname -o  | sed 's,/,+,g')
   PACKAGE_DISTRO=$(lsb_release -si)
   PACKAGE_VERSION=$(cat "$CODE"/components/openmw-mp/Version.hpp | grep TES3MP_VERSION | awk -F'"' '{print $2}')
   PACKAGE_COMMIT=$(git --git-dir=$CODE/.git rev-parse @ | head -c10)
   PACKAGE_COMMIT_SCRIPTS=$(git --git-dir=$KEEPERS/CoreScripts/.git rev-parse @ | head -c10)
-  PACKAGE_NAME="tes3mp-$PACKAGE_SYSTEM-$PACKAGE_ARCH-release-$PACKAGE_VERSION-$PACKAGE_COMMIT-$PACKAGE_COMMIT_SCRIPTS"
+
+  PACKAGE_NAME="$PACKAGE_PREFIX-$PACKAGE_SYSTEM-$PACKAGE_ARCH-release-$PACKAGE_VERSION-$PACKAGE_COMMIT-$PACKAGE_COMMIT_SCRIPTS"
   PACKAGE_DATE="$(date +"%Y-%m-%d")"
+
   echo -e "TES3MP $PACKAGE_VERSION ($PACKAGE_COMMIT $PACKAGE_COMMIT_SCRIPTS) built on $PACKAGE_SYSTEM $PACKAGE_ARCH ($PACKAGE_DISTRO) on $PACKAGE_DATE by $USER ($HOSTNAME)" > "$PACKAGE_TMP"/tes3mp-package-info.txt
 
   #CREATE PRE-LAUNCH SCRIPT
@@ -872,20 +890,28 @@ fi
 EOF
 
   #CREATE WRAPPERS
-  echo -e "\nCreating wrappers"
+  echo -e "\n\nCreating wrappers"
   for BINARY in "${PACKAGE_BINARIES[@]}"; do
-    WRAPPER="$BINARY"
-    BINARY_RENAME="$BINARY.$PACKAGE_ARCH"
-    mv "$BINARY" "$BINARY_RENAME"
-    printf "#!/bin/bash\n\nWRAPPER=\"\$(basename \$0)\"\nGAMEDIR=\"\$(dirname \$0)\"\ncd \"\$GAMEDIR\"\nif test -f ./tes3mp-prelaunch; then bash ./tes3mp-prelaunch \"\$WRAPPER\"; fi\nLD_LIBRARY_PATH=\"./lib\" ./$BINARY_RENAME \"\$@\"" > "$WRAPPER"
+    if [ ! -f "$BINARY" ]; then
+      echo -e "Binary $BINARY not found"
+    else
+      WRAPPER="$BINARY"
+      BINARY_RENAME="$BINARY.$PACKAGE_ARCH"
+      mv "$BINARY" "$BINARY_RENAME"
+      printf "#!/bin/bash\n\nWRAPPER=\"\$(basename \$0)\"\nGAMEDIR=\"\$(dirname \$0)\"\ncd \"\$GAMEDIR\"\nif test -f ./tes3mp-prelaunch; then bash ./tes3mp-prelaunch \"\$WRAPPER\"; fi\nLD_LIBRARY_PATH=\"./lib\" ./$BINARY_RENAME \"\$@\"" > "$WRAPPER"
+    fi
   done
   chmod 755 *
 
   #CREATE ARCHIVE
   echo -e "\nCreating archive"
-  mv "$PACKAGE_TMP" "$BASE"/TES3MP
-  PACKAGE_TMP="$BASE"/TES3MP
-  tar cvzf "$BASE"/package.tar.gz --directory="$BASE" TES3MP/
+
+  PACKAGE_FOLDER="TES3MP"
+  if [ $SERVER_ONLY ]; then PACKAGE_FOLDER="$PACKAGE_FOLDER-server"; fi
+
+  mv "$PACKAGE_TMP" "$BASE"/"$PACKAGE_FOLDER"
+  PACKAGE_TMP="$BASE"/"$PACKAGE_FOLDER"
+  tar cvzf "$BASE"/package.tar.gz --directory="$BASE" "$PACKAGE_FOLDER"/
 
   #RENAME ARCHIVE
   mv "$BASE"/package.tar.gz "$BASE"/"$PACKAGE_NAME".tar.gz
